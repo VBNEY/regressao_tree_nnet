@@ -1,0 +1,224 @@
+
+library(mise)
+print('teste')
+mise()
+plot('x')
+gc()
+rm(list = ls())
+options(scipen=999)#Não utilizar notação cientifica
+options(digits=5) 
+
+library(dplyr)
+library(rpart)
+library(randomForest)
+library(rpart.plot)
+
+outersect <- function(x, y) {sort(c(setdiff(x, y),setdiff(y, x)))}
+basic_cleaning_to_numbers <-function(x,na_tol=0.33,EXCLUDE_VECTOR=c()){
+  has_space_or_comma_no_letter <- function(x){
+    x <- x[complete.cases(x),]
+    if(nrow(x)>5000){
+      x<-x[sample(5000),]}
+
+    temp<-data.frame(t(apply(x,2,function(x) sum(grepl('[a-z]',x,ignore.case = T)))))
+    temp<-colnames(temp[,temp[1,]>0, drop=FALSE])
+    temp1 <-grepl("[0-9]+[[:space:]]+[0-9]", x)
+    temp1 <- colnames(x[,temp1, drop=FALSE])
+    temp2 <-grepl("[0-9]+[,]+[0-9]", x)
+    temp2 <- colnames(x[,temp2, drop=FALSE])
+    temp3<-data.frame(t(apply(x,2,function(x) sum(grepl('[;]',x,ignore.case = T)))))
+    temp3<-colnames(temp3[,temp3[1,]>0, drop=FALSE])
+    temp1 <- unique(setdiff(c(temp1,temp2),c(temp,temp3)))
+    return(temp1)}
+  print(dim(x))
+  y<-x
+  y[y=='NULL'] <- NA
+  y[y=='-'] <- NA
+  y[y=='<NA>'] <- NA
+  y <- y[, which(colMeans(is.na(y)) < na_tol)]
+  y <- y[which(rowMeans(is.na(y)) < na_tol), ]
+  x<-dataset
+  w <- has_space_or_comma_no_letter(x)
+  y[w]<-data.frame(lapply(y[w], function(x) as.numeric(gsub("%","",gsub(",",".",gsub(" ","", x))))))
+  w <- which(sapply( y, class ) == 'integer' )
+  y[w]<-data.frame(lapply(y[w], function(x) as.numeric(x)))  
+  print(dim(y))
+  print(outersect(colnames(x),colnames(y)))
+  return(y)}
+rename_columns<-function(df,caracteres=c('.',',',';',' ','~','*','[',']','{','}')){
+  for (i in 1:NCOL(df)){for(j in caracteres){names(df)[i]<-gsub(paste0("\\",j),"",names(df)[i])}}
+  return(df)
+}
+unscale<-function(df_escalonado, scaledata){
+  dftemp<-t(apply(df_escalonado, 1, function(r)r*attr(scaledata,'scaled:scale') + attr(scaledata, 'scaled:center')))
+  return(dftemp)
+}
+
+
+#-------------------------------------------------------------------------------
+BD = 'D:/escoria_s.txt' #Defect ; ifelse(dataset[,TARGET]=="Accept", 0, 1)
+dataset <- read.table(file = BD, header = TRUE, sep='\t',dec = ",", stringsAsFactors = FALSE)
+dataset<-dataset[sample(nrow(dataset)),]
+dataset<-basic_cleaning_to_numbers(dataset)
+dataset<-rename_columns(dataset)
+str(dataset)
+
+TARGET<-c('EFICIÊNCIA')
+TRAIN_VECTOR<-setdiff(colnames(dataset),c(TARGET,'SVZM','SPANELA'))
+
+
+#Amostragem da população bruta
+test_sample_population <-0.20
+
+#Retira 1º amostra da populacao bruta (Definição de Cutoff ou avaliação do modelo)
+dataset<-dataset[sample(nrow(dataset)),]
+random_splits<-runif(nrow(dataset))
+dataset_amostra<-dataset[random_splits<=test_sample_population,]
+dataset <- dataset[random_splits>test_sample_population,]
+
+
+hist(sqrt(dataset$FEMNAC))
+
+formula_lm  <- as.formula(paste(TARGET, "~", paste(TRAIN_VECTOR, collapse="+")))
+fit <- rpart(formula = formula_lm,method = "anova", data = dataset,control = rpart.control(minsplit=60,cp = 0.001,maxdepth =4))
+y_pred = predict(fit, newdata = dataset)
+Union_table <- cbind(dataset,Y = as.vector(y_pred))
+filtro<-abs(as.vector(y_pred)-dataset[,TARGET])<=0.05
+
+#dataset<-dataset[filtro,]
+NROW(dataset)
+
+
+cor(Union_table[,c(TARGET,'Y')])^2
+plot(Union_table[,c('Y',TARGET)])
+
+printcp(fit)
+png(file = "decTree.png", width = 1200,height = 800)
+  plot(fit, uniform = TRUE, main = "Regression using Decision Tree")
+  text(fit, use.n = TRUE, cex = 1.2)
+dev.off()
+
+png(file = "rpartplot.png", width = 1920,height = 1080)
+  rpart.plot(fit)
+dev.off()
+rpart.plot(fit)
+
+
+
+classifier <- randomForest(formula_lm,data=dataset,mtry=4,ntree = 501,replace=F,keep.forest=T,importance=T)
+
+y_pred = predict(classifier, newdata = dataset_amostra)
+rmse_modelo<-sqrt(mean((y_pred-dataset_amostra[,TARGET])^2))
+mae_modelo<-mean(abs(y_pred-dataset_amostra[,TARGET]))
+rsq <- function (x, y) cor(x, y) ^ 2
+rsq_modelo<-rsq(y_pred,dataset_amostra[,TARGET])
+
+dataset_amostra<-dataset_amostra[complete.cases(dataset_amostra[,c(TRAIN_VECTOR,TARGET)]),c(TRAIN_VECTOR,TARGET)]
+y_pred = predict(classifier, newdata = dataset_amostra)
+rmse_amostra<-sqrt(mean((y_pred-dataset_amostra[,TARGET])^2))
+mae_amostra<-mean(abs(y_pred-dataset_amostra[,TARGET]))
+rsq_amostra<-rsq(y_pred,dataset_amostra[,TARGET])
+
+
+# Para escolher o número de árvores (Hyperparâmetro ntree)
+par(mfrow=c(1,1))
+pdf('Numero_arvores.pdf')
+plot(classifier)
+dev.off()
+
+##ACHAR MELHOR PARA (Hyperparâmetro mtry)
+tuneRF(dataset[,TRAIN_VECTOR],dataset[ , TARGET], stepFactor=1.5)
+
+#Verificação da importancia das variáveis do modelo
+importance(classifier)
+pdf('ImportanciaRF.pdf')
+plot(varImpPlot(classifier))
+dev.off()
+
+
+#Escalonamento das variáveis
+dataset<- scale(dataset, center = TRUE, scale = TRUE)
+dataset_amostra<- scale(dataset_amostra, center = TRUE, scale = TRUE)
+
+formula = paste(TARGET, "~", paste(TRAIN_VECTOR, collapse="+"))
+nneuronio<-length(TRAIN_VECTOR)+3
+
+ANN <- neuralnet(formula,
+                 data = dataset,
+                 threshold = 0.01,
+                 hidden = c(nneuronio),
+                 act.fct='logistic', #tanh;logistic
+                 lifesign = 'full',
+                 stepmax=100000,
+                 rep=1)
+plot(ANN)
+y_pred = predict(ANN, newdata =dataset_amostra)
+
+rmse_amostra<-sqrt(mean((y_pred-dataset_amostra[,TARGET])^2))
+mae_amostra<-mean(abs(y_pred-dataset_amostra[,TARGET]))
+rsq <- function (x, y) cor(x, y) ^ 2
+rsq_amostra<-rsq(y_pred,dataset_amostra[,TARGET])
+
+#COMPARAR PREVISTO E REAL POR PADRÃO DE AÇO
+Union_table <- data.frame(cbind(dataset_amostra,Y = as.vector(round(y_pred,1))))
+plot(Union_table[,c(TARGET,'Y')])
+cor(Union_table[,c(TARGET,'Y')])
+
+
+Union_table<-Union_table[,setdiff(colnames(Union_table),TARGET)]
+names(Union_table)[names(Union_table) ==paste0('Y')]<-paste0(TARGET)
+Union_table<-unscale(Union_table,dataset_amostra)
+Union_table<-cbind(Union_table,vlr_original=amostra_target)
+plot(Union_table[,c(TARGET,'vlr_original')])
+
+summary(model)
+
+
+
+write.table(Union_table, file='Union_table.txt',row.names=FALSE,sep=";",dec=",")
+
+#realização do pareto.....................................
+
+percentual<-0.07
+agrupador<-c('ModaGrade') #ModaGrade Moda.FamSup. ModaCustomer ModaPad
+metrica<-c('count') #count avg n
+
+Union_table$IDY<-ifelse(Union_table$Y>percentual,1,0)
+formula_aggregate<- as.formula(paste("IDY ~ ",agrupador))
+detalhe_cluster<- aggregate(formula_aggregate, data=Union_table,FUN= {function(x) c(avg=mean(x), sd=sd(x), count=length(x),min=min(x),max=max(x),sum=sum(x))})
+detalhe_cluster<-data.frame(Cliente=detalhe_cluster[,1],
+                            avg=as.numeric(format(round(detalhe_cluster[,'IDY'][,1],2))),
+                            n=as.numeric(format(round(detalhe_cluster[,'IDY'][,3],2))),
+                            sum=as.numeric(format(round(detalhe_cluster[,'IDY'][,6],1))),stringsAsFactors = FALSE)
+
+myDf <- data.frame(count=detalhe_cluster$sum,avg=detalhe_cluster$avg,n=detalhe_cluster$n,Grupo=detalhe_cluster$Cliente, stringsAsFactors = FALSE)
+myDf <- myDf[order(myDf$count, decreasing=TRUE), ]
+principais<-myDf[1:15,'Grupo']
+myDf$Grupo <- factor(myDf$Grupo, levels=myDf$Grupo)
+myDf$cumulative <- cumsum(myDf$count)
+myDf$cumulative <- round(100 * myDf$cumulative/tail(myDf$cumulative, n=1),1)
+scaleRight <- tail(myDf$cumulative, n=1)/head(myDf$count, n=1)
+
+myDf$plot<-myDf[,metrica]
+myDf<-myDf[1:15,]
+
+library(ggplot2)
+ggplot(myDf, aes(x=Grupo)) +
+  geom_bar(aes(y=plot), fill='deepskyblue4', stat="identity") +
+  geom_text(aes(x = Grupo, y = plot), label = myDf$plot, vjust = -1)+
+  theme(axis.text.x = element_text(angle=90, vjust=0.6)) +
+  labs(title = paste0("Pareto Plot - Resultado do modelo com perda superior a ",percentual*100,"% por ",agrupador), subtitle = "", x = 'Grupo')  +
+
+  scale_y_continuous(sec.axis = sec_axis(~.*scaleRight, name = "Cumulative (%)"))+
+  geom_path(aes(y=cumulative/scaleRight, group=1),colour="red", size=0.9) +
+  geom_point(aes(y=cumulative/scaleRight, group=1),colour="red") +
+  geom_text(aes(x = Grupo, y = cumulative/scaleRight), label = myDf$cumulative, vjust = -1)
+
+
+tempUnion_table<-Union_table[Union_table[,'ModaGrade'] %in% principais,c('ModaGrade','PePlacao','DesclPartida','QtdeLgDistinct','SumDeltaMLVeio','ProbBS','QtdeInterfaceMIX','Y',TARGET)]
+tempUnion_table$aleatorio<-runif(nrow(tempUnion_table))
+detalhe_cluster<- aggregate(formula = .~ ModaGrade, data=tempUnion_table,FUN= {function(x) c(avg=mean(x))})
+detalhe_cluster<-detalhe_cluster[order(detalhe_cluster$Y, decreasing=TRUE),]
+
+
+write.table(detalhe_cluster, file='Teste.txt',row.names=FALSE,sep=";",dec=",")
